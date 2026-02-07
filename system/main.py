@@ -6,16 +6,22 @@ import time
 import warnings
 import numpy as np
 import logging
+import json
 
 from flcore.servers.serverlocal import Local
 from flcore.servers.serverproto import FedProto
+from flcore.servers.serverprotoee import FedProto as FedProto_EE
 from flcore.servers.servergen import FedGen
 from flcore.servers.serverfd import FD
 from flcore.servers.serverlg import LG_FedAvg
 from flcore.servers.serverfml import FML
 from flcore.servers.serverkd import FedKD
 from flcore.servers.servergh import FedGH
+from flcore.servers.servercst import FedGH as FedCST
+from flcore.servers.serverghee import FedGH as FedGH_EE
+from flcore.servers.serverprotonorm import ProtoNorm
 from flcore.servers.servertgp import FedTGP
+from flcore.servers.servertgpee import FedTGP as FedTGP_EE
 from flcore.servers.serverktl_stylegan_xl import FedKTL as FedKTL_stylegan_xl
 from flcore.servers.serverktl_stylegan_3 import FedKTL as FedKTL_stylegan_3
 from flcore.servers.serverktl_stable_diffusion import FedKTL as FedKTL_stable_diffusion
@@ -41,7 +47,41 @@ def run(args):
         start = time.time()
 
         # Generate args.models
-        if args.model_family == "HtFE-img-2":
+        if args.model_family == "Ht0":
+            in_feat = 3
+            if args.dataset[:5] == 'mnist':
+                in_feat = 1
+                dim = "1024"
+            elif args.dataset[:5] == "Cifar":
+                dim = "1600"
+            else:
+                dim = "10816"
+            args.models = [
+                'resnet8(num_classes=args.num_classes)',
+                'mobilenet_v2(pretrained=False, num_classes=args.num_classes)',
+                'torchvision.models.shufflenet_v2_x1_0(pretrained=False)',
+                'torchvision.models.efficientnet_b0(pretrained=False)',
+            ]
+
+        elif args.model_family == "HmCNN":
+            in_feat = 3
+            if args.dataset[:5] == 'mnist':
+                in_feat = 1
+                dim = "1024"
+            elif args.dataset[:5] == "Cifar":
+                dim = "1600"
+            else:
+                dim = "10816"
+            args.models = [
+                f'FedAvgCNN(in_features={in_feat}, num_classes=args.num_classes, dim={dim})'
+            ]
+
+        elif args.model_family == "HmRes18":
+            args.models = [
+                'torchvision.models.resnet18(pretrained=False, num_classes=args.num_classes)'
+            ]
+
+        elif args.model_family == "HtFE-img-2":
             args.models = [
                 'FedAvgCNN(in_features=3, num_classes=args.num_classes, dim=1600)', # for 32x32 img
                 'torchvision.models.resnet18(pretrained=False, num_classes=args.num_classes)', 
@@ -268,6 +308,9 @@ def run(args):
         elif args.algorithm == "FedProto":
             server = FedProto(args, i)
 
+        elif args.algorithm in {"FedProto-EE", "FedProtoEE"}:
+            server = FedProto_EE(args, i)
+
         elif args.algorithm == "FedGen":
             server = FedGen(args, i)
 
@@ -286,8 +329,20 @@ def run(args):
         elif args.algorithm == "FedGH":
             server = FedGH(args, i)
 
+        elif args.algorithm in {"FedCST", "CST"}:
+            server = FedCST(args, i)
+
+        elif args.algorithm in {"FedGH-EE", "FedGHEE"}:
+            server = FedGH_EE(args, i)
+
+        elif args.algorithm == "ProtoNorm":
+            server = ProtoNorm(args, i)
+
         elif args.algorithm == "FedTGP":
             server = FedTGP(args, i)
+            
+        elif args.algorithm in {"FedTGP-EE", "FedTGPEE"}:
+            server = FedTGP_EE(args, i)
             
         elif args.algorithm == "FedKTL-stylegan-xl":
             server = FedKTL_stylegan_xl(args, i)
@@ -364,6 +419,7 @@ if __name__ == "__main__":
     parser.add_argument('-mfn', "--models_folder_name", type=str, default='',
                         help="The folder of pre-trained models")
     parser.add_argument('-fs', "--few_shot", type=int, default=0)
+    parser.add_argument('--proto_norm', type=str, default="none")
     # practical
     parser.add_argument('-cdr', "--client_drop_rate", type=float, default=0.0,
                         help="Rate for clients that train but drop out")
@@ -391,6 +447,33 @@ if __name__ == "__main__":
     parser.add_argument('-Te', "--T_end", type=float, default=0.98)
     # FedGH
     parser.add_argument('-slr', "--server_learning_rate", type=float, default=0.01)
+    # Early-exit loss weights
+    parser.add_argument('-ee_weights', '--ee_weights', type=str, default="")
+    # EE adaptive weighting (client-local)
+    parser.add_argument('--ee_adapt', action='store_true')
+    parser.add_argument('--ee_adapt_every', type=int, default=1)
+    parser.add_argument('--ee_adapt_step', type=float, default=0.1)
+    parser.add_argument('--ee_min_w', type=float, default=0.2)
+    parser.add_argument('--ee_max_w', type=float, default=0.8)
+    # FedGH-EE
+    parser.add_argument('--ghee_reinit_head', action='store_true')
+    parser.add_argument('-ghee_stage', '--ghee_stage', type=str, default="")
+    # FedTGP-EE
+    parser.add_argument('-tgpee_stage', '--tgpee_stage', type=str, default="")
+    # CST
+    parser.add_argument('-cst_stage', '--cst_stage', type=str, default="")
+    parser.add_argument('-cst_n_neg', '--cst_n_neg', type=int, default=1)
+    parser.add_argument('-cst_lambda_gate', '--cst_lambda_gate', type=float, default=10.0)
+    # ProtoNorm
+    parser.add_argument('-pa', "--prototype_alignment", action='store_true')
+    parser.add_argument('-pu', "--prototype_upscaling", action='store_true')
+    parser.add_argument('-csf', "--constant_scale_factor", type=float, default=80.0)
+    parser.add_argument('-wots', "--wo_thomson", action='store_true')
+    parser.add_argument('-uit', "--thomson_iteration_number", type=int, default=500)
+    parser.add_argument('-ulr', "--thomson_learning_rate", type=float, default=0.1)
+    parser.add_argument('-umt', "--thomson_momentum", type=float, default=0.9)
+    parser.add_argument('-uest', "--thomson_early_stop", type=int, default=10)
+    parser.add_argument('--rescale_proto', type=str, default='simple')
     # FedTGP
     parser.add_argument('-mart', "--margin_threthold", type=float, default=100.0)
     # FedKTL
@@ -416,6 +499,22 @@ if __name__ == "__main__":
     for arg in vars(args):
         print(arg, '=',getattr(args, arg))
     print("=" * 50)
+
+    if args.algorithm == "ProtoNorm":
+        data_root = os.path.join(os.path.dirname(os.getcwd()), 'dataset')
+        dataset_path = os.path.join(data_root, args.dataset)
+        config_path = os.path.join(dataset_path, 'config.json')
+        with open(config_path, 'r') as file:
+            data = json.load(file)
+            args.num_classes = data['num_classes']
+            args.dataset_type = data['partition']
+            data_statistic = data['Size of samples for labels in clients']
+
+        data_dist = np.zeros((args.num_clients, args.num_classes))
+        for i in range(args.num_clients):
+            client_data_dist_np = np.array(data_statistic[i])
+            data_dist[i, client_data_dist_np[:, 0]] = client_data_dist_np[:, 1]
+        args.data_dist = data_dist.tolist()
 
 
     # if args.dataset == "mnist" or args.dataset == "fmnist":

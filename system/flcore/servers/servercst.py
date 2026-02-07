@@ -31,6 +31,9 @@ class FedGH(Server):
         self.stage1_mode, self.stage4_mode = self._resolve_cst_modes(args)
         self.n_neg = self._get_env_int("CST_N_NEG", int(getattr(args, "cst_n_neg", 1)))
         self.n_neg = max(0, self.n_neg)
+        self.server_batch_size = int(getattr(args, "server_batch_size", 0) or 0)
+        if self.server_batch_size <= 0:
+            self.server_batch_size = self.batch_size
         self.class_proto_lists = {}
 
         head = load_item(self.clients[0].role, 'model', self.clients[0].save_folder_name).head
@@ -86,7 +89,7 @@ class FedGH(Server):
                 token = token.replace("stage", "").replace("cst", "").strip()
                 if token in {"1_0", "1_1", "1_2"}:
                     stage1 = token
-                if token in {"4_0", "4_1", "4_2"}:
+                if token in {"4_0", "4_1_1", "4_1_2", "4_1_3", "4_2_1", "4_2_2", "4_2_3"}:
                     stage4 = token
         return stage1, stage4
 
@@ -145,7 +148,7 @@ class FedGH(Server):
             uploaded_protos = load_item(self.role, 'uploaded_protos', self.save_folder_name)
             if not uploaded_protos:
                 return
-            proto_loader = DataLoader(uploaded_protos, self.batch_size, drop_last=False, shuffle=True)
+            proto_loader = DataLoader(uploaded_protos, self.server_batch_size, drop_last=False, shuffle=True)
             opt_h = torch.optim.SGD(head.parameters(), lr=self.server_learning_rate)
             for _ in range(self.server_epochs):
                 for p, y in proto_loader:
@@ -177,9 +180,12 @@ class FedGH(Server):
                 head_k = copy.deepcopy(base_head)
                 head_k.train()
                 opt_k = torch.optim.SGD(head_k.parameters(), lr=self.server_learning_rate)
+                proto_list = train_proto_lists.get(k, [])
+                proto_loader = DataLoader(proto_list, self.server_batch_size, drop_last=False, shuffle=True)
                 for _ in range(self.server_epochs):
-                    for proto in train_proto_lists.get(k, []):
-                        loss = self._positive_only_loss(head_k, k, proto)
+                    for proto_batch in proto_loader:
+                        proto_batch = proto_batch.to(self.device)
+                        loss = self._positive_only_loss_batch(head_k, k, proto_batch)
                         opt_k.zero_grad()
                         loss.backward()
                         opt_k.step()
@@ -207,6 +213,16 @@ class FedGH(Server):
             pos_logit = pos_logit + head.bias[class_id]
         return F.softplus(-pos_logit)
 
+    def _positive_only_loss_batch(self, head, class_id, pos_protos):
+        if not torch.is_tensor(pos_protos):
+            pos_protos = self._to_tensor(pos_protos)
+        pos_protos = pos_protos.to(self.device)
+        weight = head.weight[class_id]
+        pos_logit = torch.matmul(pos_protos, weight)
+        if head.bias is not None:
+            pos_logit = pos_logit + head.bias[class_id]
+        return F.softplus(-pos_logit).mean()
+
     def _train_stage1_1_binary_heads(self, train_proto_lists, base_head):
         available_classes = sorted(train_proto_lists.keys())
         in_dim = int(base_head.weight.shape[1])
@@ -224,14 +240,24 @@ class FedGH(Server):
                     if base_head.bias is not None:
                         head_bin.bias[1].copy_(base_head.bias[k].detach())
             opt_k = torch.optim.SGD(head_bin.parameters(), lr=self.server_learning_rate)
+            proto_list = train_proto_lists.get(k, [])
+            proto_loader = DataLoader(proto_list, self.server_batch_size, drop_last=False, shuffle=True)
             for _ in range(self.server_epochs):
-                for proto in train_proto_lists.get(k, []):
-                    neg_protos = self._sample_negative_protos(k, available_classes, train_proto_lists)
-                    loss = self._binary_head_loss(head_bin, proto, neg_protos)
+                for proto_batch in proto_loader:
+                    proto_batch = proto_batch.to(self.device)
+                    loss = 0.0
+                    for proto in proto_batch:
+                        neg_protos = self._sample_negative_protos(k, available_classes, train_proto_lists)
+                        loss = loss + self._binary_head_loss(head_bin, proto, neg_protos)
+                    loss = loss / max(1, proto_batch.shape[0])
                     opt_k.zero_grad()
                     loss.backward()
                     opt_k.step()
-            new_weight[k] = head_bin.weight[1].detach()
+            w = head_bin.weight[1].detach()
+            w_norm = torch.norm(w)
+            if w_norm.item() > 0:
+                w = w / (w_norm + 1e-12)
+            new_weight[k] = w
             if new_bias is not None and head_bin.bias is not None:
                 new_bias[k] = head_bin.bias[1].detach()
         return new_weight, new_bias

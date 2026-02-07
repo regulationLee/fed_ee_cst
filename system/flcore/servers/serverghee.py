@@ -1,3 +1,5 @@
+import os
+import re
 import time
 import random
 
@@ -25,6 +27,7 @@ class FedGH(Server):
         self.server_learning_rate = args.server_learning_rate
         self.server_epochs = args.server_epochs
         self.reinit_head = bool(getattr(args, "ghee_reinit_head", False))
+        self.stage1_mode = self._resolve_ghee_stage(args)
 
         model = load_item(self.clients[0].role, 'model', self.clients[0].save_folder_name)
         head = getattr(model, "head", None)
@@ -97,17 +100,101 @@ class FedGH(Server):
         for i, w in enumerate(self.uploaded_weights):
             self.uploaded_weights[i] = w / tot_samples if tot_samples > 0 else 0.0
 
+        self.exit_proto_lists = exit_proto_lists
+        self.uploaded_protos = self._select_head_protos(exit_proto_lists)
+        self.last_proto_counts = {}
+        for exit_id, class_map in exit_proto_lists.items():
+            self.last_proto_counts[exit_id] = sum(len(v) for v in class_map.values())
+        self.last_proto_total = sum(self.last_proto_counts.values()) if self.last_proto_counts else 0
+
+    def _resolve_ghee_stage(self, args):
+        stage1 = "1_0"
+        raw_vals = [
+            os.getenv("GHEE_STAGE", "").strip().lower(),
+            str(getattr(args, "ghee_stage", "")).strip().lower(),
+        ]
+        for raw in raw_vals:
+            if not raw:
+                continue
+            tokens = [t for t in re.split(r"[+,|\\s]+", raw) if t]
+            for token in tokens:
+                token = token.replace("stage", "").replace("ghee", "").strip()
+                if token in {"1_0", "1_1", "1_2"}:
+                    stage1 = token
+        return stage1
+
+    def _flatten_exit_proto_lists(self, exit_proto_lists):
         uploaded_protos = []
         for class_map in exit_proto_lists.values():
             for cc, proto_list in class_map.items():
                 y = torch.tensor(cc, dtype=torch.int64)
                 for proto in proto_list:
                     uploaded_protos.append((proto, y))
-        self.uploaded_protos = uploaded_protos
-        self.last_proto_counts = {}
-        for exit_id, class_map in exit_proto_lists.items():
-            self.last_proto_counts[exit_id] = sum(len(v) for v in class_map.values())
-        self.last_proto_total = sum(self.last_proto_counts.values()) if self.last_proto_counts else 0
+        return uploaded_protos
+
+    def _split_base_ee_protos(self, exit_proto_lists):
+        if not exit_proto_lists:
+            return {}, {}
+        exit_ids = sorted(exit_proto_lists.keys())
+        if not exit_ids:
+            return {}, {}
+        final_exit = max(exit_ids)
+        base_map = exit_proto_lists.get(final_exit, {})
+        ee_map = {}
+        for eid in exit_ids:
+            if eid == final_exit:
+                continue
+            class_map = exit_proto_lists.get(eid, {})
+            for cc, proto_list in class_map.items():
+                ee_map.setdefault(cc, []).extend(proto_list)
+        return base_map, ee_map
+
+    def _pick_with_cap(self, base_list, ee_list, cap):
+        if cap <= 0:
+            return []
+        base_list = list(base_list)
+        ee_list = list(ee_list)
+        base_count = len(base_list)
+        if base_count >= cap:
+            if base_count == cap:
+                return base_list
+            return random.sample(base_list, cap)
+        remaining = cap - base_count
+        if remaining <= 0:
+            return base_list
+        if len(ee_list) <= remaining:
+            return base_list + ee_list
+        return base_list + random.sample(ee_list, remaining)
+
+    def _select_head_protos(self, exit_proto_lists):
+        if not exit_proto_lists:
+            return []
+        if self.stage1_mode == "1_0":
+            return self._flatten_exit_proto_lists(exit_proto_lists)
+
+        base_map, ee_map = self._split_base_ee_protos(exit_proto_lists)
+        base_counts = {cc: len(plist) for cc, plist in base_map.items() if len(plist) > 0}
+        if not base_counts:
+            return self._flatten_exit_proto_lists(exit_proto_lists)
+
+        min_base = min(base_counts.values())
+        max_base = max(base_counts.values())
+        if self.stage1_mode == "1_1":
+            cap = 2 * min_base
+            print(f"[GHEE] stage1_1 min_base={min_base} cap={cap}")
+        else:
+            cap = max_base
+            print(f"[GHEE] stage1_2 max_base={max_base} cap={cap}")
+
+        uploaded_protos = []
+        for cc in sorted(base_map.keys()):
+            base_list = base_map.get(cc, [])
+            ee_list = ee_map.get(cc, [])
+            picked = self._pick_with_cap(base_list, ee_list, cap)
+            y = torch.tensor(cc, dtype=torch.int64)
+            for proto in picked:
+                uploaded_protos.append((proto, y))
+        return uploaded_protos
 
     def train_head(self):
         if not getattr(self, "uploaded_protos", None):

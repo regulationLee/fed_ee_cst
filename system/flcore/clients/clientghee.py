@@ -19,6 +19,13 @@ class clientGH(Client):
         self.num_exits = 2
         self.ee_weights = self._resolve_ee_weights()
         self.proto_norm = getattr(args, "proto_norm", "none")
+        self.ee_adapt = bool(getattr(args, "ee_adapt", False))
+        self.ee_adapt_every = int(getattr(args, "ee_adapt_every", 1))
+        self.ee_adapt_step = float(getattr(args, "ee_adapt_step", 0.1))
+        self.ee_min_w = float(getattr(args, "ee_min_w", 0.2))
+        self.ee_max_w = float(getattr(args, "ee_max_w", 0.8))
+        self.ee_w_final = self.ee_weights[-1] if len(self.ee_weights) == 2 else 0.5
+        self._printed_ee = False
 
     def _resolve_ee_weights(self):
         env = os.getenv("EE_WEIGHTS", "").strip()
@@ -91,12 +98,75 @@ class clientGH(Client):
             loss = loss + weights[i] * self.loss(logits_by_exit[eid], y)
         return loss
 
+    def _get_backbone_params(self, model):
+        if hasattr(model, "backbone"):
+            params = list(model.backbone.parameters())
+        elif hasattr(model, "base"):
+            params = list(model.base.parameters())
+        else:
+            params = list(model.parameters())
+        return [p for p in params if p.requires_grad]
+
+    def _update_adaptive_weights(self, loss_early, loss_final, model):
+        if not self.ee_adapt:
+            return
+        params = self._get_backbone_params(model)
+        if not params:
+            return
+        g_early = torch.autograd.grad(loss_early, params, retain_graph=True, allow_unused=True)
+        g_final = torch.autograd.grad(loss_final, params, retain_graph=True, allow_unused=True)
+
+        dot = 0.0
+        norm_e = 0.0
+        norm_f = 0.0
+        for ge, gf in zip(g_early, g_final):
+            if ge is None or gf is None:
+                continue
+            dot = dot + torch.sum(ge * gf)
+            norm_e = norm_e + torch.sum(ge * ge)
+            norm_f = norm_f + torch.sum(gf * gf)
+        if norm_e.item() <= 0 or norm_f.item() <= 0:
+            return
+        cos = (dot / (torch.sqrt(norm_e) * torch.sqrt(norm_f) + 1e-12)).item()
+
+        min_w = min(self.ee_min_w, self.ee_max_w)
+        max_w = max(self.ee_min_w, self.ee_max_w)
+        w_final = self.ee_w_final + self.ee_adapt_step * (-cos)
+        w_final = max(min_w, min(max_w, w_final))
+        self.ee_w_final = w_final
+        self.ee_weights = [1.0 - w_final, w_final]
+
+    def _warmup_exit_modules(self, model, loader):
+        if not hasattr(model, "forward_all_exits"):
+            return
+        for x, _ in loader:
+            if type(x) == type([]):
+                x[0] = x[0].to(self.device)
+            else:
+                x = x.to(self.device)
+            model.eval()
+            with torch.no_grad():
+                _ = model.forward_all_exits(x)
+            break
+
     def train(self):
         trainloader = self.load_train_data()
         model = self._load_wrapped_model()
         shared_head = load_item('Server', 'head', self.save_folder_name)
         self._apply_shared_head(model, shared_head)
+        self._warmup_exit_modules(model, trainloader)
         model.train()
+
+        if not self._printed_ee:
+            if self.ee_adapt:
+                print(
+                    f"[Client {self.id}] ee_weights={self.ee_weights} "
+                    f"adapt_every_epoch={self.ee_adapt_every} adapt_step={self.ee_adapt_step} "
+                    f"w_final_range=({self.ee_min_w},{self.ee_max_w})"
+                )
+            else:
+                print(f"[Client {self.id}] ee_weights={self.ee_weights} (fixed)")
+            self._printed_ee = True
 
         optimizer = torch.optim.SGD(model.parameters(), lr=self.learning_rate)
         start_time = time.time()
@@ -105,8 +175,9 @@ class clientGH(Client):
         if self.train_slow:
             max_local_epochs = np.random.randint(1, max_local_epochs // 2)
 
-        for _ in range(max_local_epochs):
-            for x, y in trainloader:
+        num_batches = len(trainloader)
+        for epoch in range(max_local_epochs):
+            for i, (x, y) in enumerate(trainloader):
                 if type(x) == type([]):
                     x[0] = x[0].to(self.device)
                 else:
@@ -118,6 +189,18 @@ class clientGH(Client):
                 if hasattr(model, "forward_all_exits"):
                     logits_by_exit = model.forward_all_exits(x)
                 if logits_by_exit:
+                    exit_ids = sorted(logits_by_exit.keys())
+                    early_exit = exit_ids[0]
+                    final_exit = exit_ids[-1]
+                    loss_early = self.loss(logits_by_exit[early_exit], y)
+                    loss_final = self.loss(logits_by_exit[final_exit], y)
+                    if (
+                        self.ee_adapt
+                        and self.ee_adapt_every > 0
+                        and ((epoch + 1) % self.ee_adapt_every == 0)
+                        and (i + 1 == num_batches)
+                    ):
+                        self._update_adaptive_weights(loss_early, loss_final, model)
                     loss = self._weighted_loss(logits_by_exit, y)
                 else:
                     output = model(x)
@@ -127,6 +210,7 @@ class clientGH(Client):
                 optimizer.step()
 
         save_item(model, self.role, 'model', self.save_folder_name)
+        print(f"[Client {self.id}] ee_weights_end={self.ee_weights} adaptive={self.ee_adapt}")
 
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - start_time

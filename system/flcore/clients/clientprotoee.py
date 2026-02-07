@@ -21,6 +21,12 @@ class clientProto(Client):
         self.lamda = args.lamda
         self.num_exits = 2
         self.ee_weights = self._resolve_ee_weights()
+        self.ee_adapt = bool(getattr(args, "ee_adapt", False))
+        self.ee_adapt_every = int(getattr(args, "ee_adapt_every", 1))
+        self.ee_adapt_step = float(getattr(args, "ee_adapt_step", 0.1))
+        self.ee_min_w = float(getattr(args, "ee_min_w", 0.2))
+        self.ee_max_w = float(getattr(args, "ee_max_w", 0.8))
+        self.ee_w_final = self.ee_weights[-1] if len(self.ee_weights) == 2 else 0.5
         self._printed_ee = False
 
     def _resolve_ee_weights(self):
@@ -63,6 +69,44 @@ class clientProto(Client):
             w = w / s
         return w
 
+    def _get_backbone_params(self, model):
+        if hasattr(model, "backbone"):
+            params = list(model.backbone.parameters())
+        elif hasattr(model, "base"):
+            params = list(model.base.parameters())
+        else:
+            params = list(model.parameters())
+        return [p for p in params if p.requires_grad]
+
+    def _update_adaptive_weights(self, loss_early, loss_final, model):
+        if not self.ee_adapt:
+            return
+        params = self._get_backbone_params(model)
+        if not params:
+            return
+        g_early = torch.autograd.grad(loss_early, params, retain_graph=True, allow_unused=True)
+        g_final = torch.autograd.grad(loss_final, params, retain_graph=True, allow_unused=True)
+
+        dot = 0.0
+        norm_e = 0.0
+        norm_f = 0.0
+        for ge, gf in zip(g_early, g_final):
+            if ge is None or gf is None:
+                continue
+            dot = dot + torch.sum(ge * gf)
+            norm_e = norm_e + torch.sum(ge * ge)
+            norm_f = norm_f + torch.sum(gf * gf)
+        if norm_e.item() <= 0 or norm_f.item() <= 0:
+            return
+        cos = (dot / (torch.sqrt(norm_e) * torch.sqrt(norm_f) + 1e-12)).item()
+
+        min_w = min(self.ee_min_w, self.ee_max_w)
+        max_w = max(self.ee_min_w, self.ee_max_w)
+        w_final = self.ee_w_final + self.ee_adapt_step * (-cos)
+        w_final = max(min_w, min(max_w, w_final))
+        self.ee_w_final = w_final
+        self.ee_weights = [1.0 - w_final, w_final]
+
     def _load_wrapped_model(self):
         model = load_item(self.role, 'model', self.save_folder_name)
         if model is None:
@@ -97,7 +141,14 @@ class clientProto(Client):
         model.train()
 
         if not self._printed_ee:
-            print(f"[Client {self.id}] ee_weights={self.ee_weights} lamda={self.lamda}")
+            if self.ee_adapt:
+                print(
+                    f"[Client {self.id}] ee_weights={self.ee_weights} lamda={self.lamda} "
+                    f"adapt_every_epoch={self.ee_adapt_every} adapt_step={self.ee_adapt_step} "
+                    f"w_final_range=({self.ee_min_w},{self.ee_max_w})"
+                )
+            else:
+                print(f"[Client {self.id}] ee_weights={self.ee_weights} lamda={self.lamda} (fixed)")
             self._printed_ee = True
 
         start_time = time.time()
@@ -107,8 +158,9 @@ class clientProto(Client):
             max_local_epochs = np.random.randint(1, max_local_epochs // 2)
 
         protos_by_exit = defaultdict(lambda: defaultdict(list))
-        for _ in range(max_local_epochs):
-            for x, y in trainloader:
+        num_batches = len(trainloader)
+        for epoch in range(max_local_epochs):
+            for i, (x, y) in enumerate(trainloader):
                 if type(x) == type([]):
                     x[0] = x[0].to(self.device)
                 else:
@@ -137,6 +189,13 @@ class clientProto(Client):
                     loss_final_proto = self.loss_mse(proto_new, feats_by_exit[final_exit]) * self.lamda
 
                 loss_final = loss_final_ce + loss_final_proto
+                if (
+                    self.ee_adapt
+                    and self.ee_adapt_every > 0
+                    and ((epoch + 1) % self.ee_adapt_every == 0)
+                    and (i + 1 == num_batches)
+                ):
+                    self._update_adaptive_weights(loss_early, loss_final, model)
                 weights = self._get_weight_tensor(y.device, len(exit_ids))
                 loss = 0.0
                 for idx, eid in enumerate(exit_ids):
@@ -160,6 +219,7 @@ class clientProto(Client):
 
         save_item(final_protos_by_exit, self.role, 'protos', self.save_folder_name)
         save_item(model, self.role, 'model', self.save_folder_name)
+        print(f"[Client {self.id}] ee_weights_end={self.ee_weights} adaptive={self.ee_adapt}")
 
         self.train_time_cost['num_rounds'] += 1
         self.train_time_cost['total_cost'] += time.time() - start_time

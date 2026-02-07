@@ -19,9 +19,10 @@ class clientGH(Client):
         self.eps = 1e-7
         self.class_counts = None
         self.gates = None
-        if self.stage4_mode in {"4_1", "4_2"}:
+        self._freeze_hooks = []
+        if self.stage4_mode in {"4_1_1", "4_1_2", "4_1_3", "4_2_1", "4_2_2", "4_2_3"}:
             self.class_counts = self._build_class_counts()
-            if self.stage4_mode == "4_1":
+            if self.stage4_mode == "4_1_1":
                 self.gates = self._build_gates_hybrid(self.class_counts)
             else:
                 self.gates = None
@@ -49,7 +50,7 @@ class clientGH(Client):
                 if self.train_slow:
                     time.sleep(0.1 * np.abs(np.random.rand()))
                 rep = model.base(x)
-                logits = self._weight_norm_logits(rep, model)
+                logits = self._linear_logits(rep, model)
                 loss = self.loss(logits, y)
                 optimizer.zero_grad()
                 loss.backward()
@@ -63,47 +64,135 @@ class clientGH(Client):
         
     def set_parameters(self):
         model = load_item(self.role, 'model', self.save_folder_name)
-        if self.stage4_mode == "4_2":
+        if self.stage4_mode in {"4_2_1", "4_2_2", "4_2_3"}:
             global_head = load_item('Server', 'head', self.save_folder_name)
             global_head = global_head.to(self.device)
             global_weight, global_bias = self._get_head_params(global_head)
-            alpha = self._compute_stage4_2_alpha().to(global_weight.device)
-            scaled_weight = global_weight * alpha.unsqueeze(1)
             local_weight, local_bias = self._get_head_params(model.head)
-            local_weight.data.copy_(scaled_weight.data)
-            if local_bias is not None and global_bias is not None:
-                local_bias.data.copy_(global_bias.data)
+            if self.class_counts is None:
+                self.class_counts = self._build_class_counts()
+            counts = self.class_counts.to(torch.float32)
+            alpha = self._compute_stage4_2_1_alpha().to(global_weight.device)
+            if self.stage4_mode == "4_2_1":
+                scaled_weight = global_weight * alpha.unsqueeze(1)
+                local_weight.data.copy_(scaled_weight.data)
+                if local_bias is not None and global_bias is not None:
+                    local_bias.data.copy_(global_bias.data)
+                self._set_frozen_class_mask(model.head, None)
+            elif self.stage4_mode == "4_2_2":
+                mask_has = counts > 0
+                scaled_weight = local_weight.data.clone()
+                if mask_has.any():
+                    scaled_weight[mask_has] = global_weight[mask_has] * alpha[mask_has].unsqueeze(1)
+                local_weight.data.copy_(scaled_weight.data)
+                if local_bias is not None and global_bias is not None:
+                    scaled_bias = local_bias.data.clone()
+                    if mask_has.any():
+                        scaled_bias[mask_has] = global_bias[mask_has]
+                    local_bias.data.copy_(scaled_bias.data)
+                mask_zero = counts == 0
+                self._set_frozen_class_mask(model.head, mask_zero)
+            else:
+                alpha = self._compute_stage4_2_3_alpha(counts).to(global_weight.device)
+                mask_has = counts > 0
+                scaled_weight = local_weight.data.clone()
+                if mask_has.any():
+                    scaled_weight[mask_has] = global_weight[mask_has] * alpha[mask_has].unsqueeze(1)
+                local_weight.data.copy_(scaled_weight.data)
+                if local_bias is not None and global_bias is not None:
+                    scaled_bias = local_bias.data.clone()
+                    if mask_has.any():
+                        scaled_bias[mask_has] = global_bias[mask_has]
+                    local_bias.data.copy_(scaled_bias.data)
+                mask_zero = counts == 0
+                self._set_frozen_class_mask(model.head, mask_zero)
             save_item(model, self.role, 'model', self.save_folder_name)
             return
-        if self.stage4_mode == "4_1":
+        if self.stage4_mode in {"4_1_1", "4_1_2", "4_1_3"}:
             global_head = load_item('Server', 'head', self.save_folder_name)
             global_head = global_head.to(self.device)
             global_weight, global_bias = self._get_head_params(global_head)
             local_weight, local_bias = self._get_head_params(model.head)
-            if self.gates is None:
+            if self.class_counts is None:
                 self.class_counts = self._build_class_counts()
-                self.gates = self._build_gates_hybrid(self.class_counts)
-            g = self.gates.to(local_weight.device).unsqueeze(1)
-            blended_weight = (1.0 - g) * local_weight + g * global_weight.to(local_weight.device)
-            local_weight.data.copy_(blended_weight.data)
-            if local_bias is not None and global_bias is not None:
-                gb = global_bias.to(local_bias.device)
-                lb = local_bias
-                blended_bias = (1.0 - self.gates.to(local_bias.device)) * lb + self.gates.to(local_bias.device) * gb
-                local_bias.data.copy_(blended_bias.data)
+            if self.stage4_mode == "4_1_1":
+                if self.gates is None:
+                    self.gates = self._build_gates_hybrid(self.class_counts)
+                g = self.gates.to(local_weight.device).unsqueeze(1)
+                blended_weight = (1.0 - g) * local_weight + g * global_weight.to(local_weight.device)
+                local_weight.data.copy_(blended_weight.data)
+                if local_bias is not None and global_bias is not None:
+                    gb = global_bias.to(local_bias.device)
+                    lb = local_bias
+                    blended_bias = (1.0 - self.gates.to(local_bias.device)) * lb + self.gates.to(local_bias.device) * gb
+                    local_bias.data.copy_(blended_bias.data)
+                if self.gates is not None:
+                    g_stats = self.gates
+                    print(
+                        f"[CST] client={self.id} gate_stats "
+                        f"mean={float(g_stats.mean()):.4f} min={float(g_stats.min()):.4f} max={float(g_stats.max()):.4f} "
+                        f"stage4={self.stage4_mode}"
+                    )
+            elif self.stage4_mode == "4_1_2":
+                alpha = self._compute_stage4_1_2_alpha(self.class_counts).to(local_weight.device)
+                blended_weight = alpha.unsqueeze(1) * local_weight + (1.0 - alpha).unsqueeze(1) * global_weight.to(local_weight.device)
+                local_weight.data.copy_(blended_weight.data)
+                if local_bias is not None and global_bias is not None:
+                    gb = global_bias.to(local_bias.device)
+                    lb = local_bias
+                    blended_bias = alpha.to(local_bias.device) * lb + (1.0 - alpha.to(local_bias.device)) * gb
+                    local_bias.data.copy_(blended_bias.data)
+            else:
+                alpha = self._compute_stage4_1_2_alpha(self.class_counts).to(local_weight.device)
+                local_weight_norm = local_weight / (local_weight.norm(dim=1, keepdim=True) + self.eps)
+                global_weight_norm = global_weight.to(local_weight.device)
+                global_weight_norm = global_weight_norm / (global_weight_norm.norm(dim=1, keepdim=True) + self.eps)
+                blended_weight = alpha.unsqueeze(1) * local_weight_norm + (1.0 - alpha).unsqueeze(1) * global_weight_norm
+                local_weight.data.copy_(blended_weight.data)
+                if local_bias is not None and global_bias is not None:
+                    gb = global_bias.to(local_bias.device)
+                    lb = local_bias
+                    lb_norm = lb / (lb.abs() + self.eps)
+                    gb_norm = gb / (gb.abs() + self.eps)
+                    blended_bias = alpha.to(local_bias.device) * lb_norm + (1.0 - alpha.to(local_bias.device)) * gb_norm
+                    local_bias.data.copy_(blended_bias.data)
             save_item(model, self.role, 'model', self.save_folder_name)
-            if self.gates is not None:
-                g = self.gates
-                print(
-                    f"[CST] client={self.id} gate_stats "
-                    f"mean={float(g.mean()):.4f} min={float(g.min()):.4f} max={float(g.max()):.4f} "
-                    f"stage4={self.stage4_mode}"
-                )
             return
         head = load_item('Server', 'head', self.save_folder_name)
         for new_param, old_param in zip(head.parameters(), model.head.parameters()):
             old_param.data = new_param.data.clone()
         save_item(model, self.role, 'model', self.save_folder_name)
+
+    def _clear_freeze_hooks(self):
+        for hook in getattr(self, "_freeze_hooks", []):
+            try:
+                hook.remove()
+            except Exception:
+                pass
+        self._freeze_hooks = []
+
+    def _set_frozen_class_mask(self, head, mask_zero):
+        self._clear_freeze_hooks()
+        if mask_zero is None or not torch.is_tensor(mask_zero) or not mask_zero.any():
+            return
+        mask = mask_zero.to(head.weight.device)
+
+        def hook_weight(grad):
+            if grad is None:
+                return grad
+            grad = grad.clone()
+            grad[mask] = 0
+            return grad
+
+        self._freeze_hooks.append(head.weight.register_hook(hook_weight))
+        if hasattr(head, "bias") and head.bias is not None:
+            def hook_bias(grad):
+                if grad is None:
+                    return grad
+                grad = grad.clone()
+                grad[mask] = 0
+                return grad
+            self._freeze_hooks.append(head.bias.register_hook(hook_bias))
 
     def collect_protos(self):
         trainloader = self.load_train_data()
@@ -143,7 +232,7 @@ class clientGH(Client):
                 token = token.replace("stage", "").replace("cst", "").strip()
                 if token in {"1_0", "1_1", "1_2"}:
                     stage1 = token
-                if token in {"4_0", "4_1", "4_2"}:
+                if token in {"4_0", "4_1_1", "4_1_2", "4_1_3", "4_2_1", "4_2_2", "4_2_3"}:
                     stage4 = token
         return stage1, stage4
 
@@ -180,19 +269,45 @@ class clientGH(Client):
         confidence = self.lambda_gate / (counts + self.lambda_gate)
         return 1.0 - (1.0 - confidence) * (1.0 - imbalance)
 
-    def _compute_stage4_2_alpha(self):
+    def _compute_stage4_2_1_alpha(self):
         counts = self.class_counts
         if counts is None:
             counts = self._build_class_counts()
         counts = counts.to(torch.float32)
-        if counts.numel() == 0:
-            return torch.full((self.num_classes,), 0.5, dtype=torch.float32)
-        n_max = float(counts.max().item())
-        if n_max <= 0.0:
-            return torch.full((self.num_classes,), 0.5, dtype=torch.float32)
-        denom = torch.log(torch.tensor(n_max + 1.0))
-        alpha = 0.5 + 0.5 * (torch.log(counts + 1.0) / denom)
+        total = float(counts.sum().item())
+        if total <= 0.0:
+            return torch.ones((self.num_classes,), dtype=torch.float32)
+        c_max = float(counts.max().item())
+        if c_max <= 0.0:
+            return torch.full((self.num_classes,), 1.0 / total, dtype=torch.float32)
+        base = 1.0 / total
+        alpha = torch.full((self.num_classes,), base, dtype=torch.float32)
+        mask_has = counts > 0
+        mask_full = counts == c_max
+        mask_mid = mask_has & (~mask_full)
+        if mask_mid.any():
+            alpha[mask_mid] = base + (counts[mask_mid] / c_max)
+        if mask_full.any():
+            alpha[mask_full] = 1.0
         return alpha
+
+    def _compute_stage4_2_3_alpha(self, counts):
+        counts = counts.to(torch.float32)
+        total = float(counts.sum().item())
+        if total <= 0.0:
+            return torch.zeros((self.num_classes,), dtype=torch.float32)
+        alpha = torch.zeros((self.num_classes,), dtype=torch.float32)
+        mask_has = counts > 0
+        if mask_has.any():
+            alpha[mask_has] = counts[mask_has] / total
+        return alpha
+
+    def _compute_stage4_1_2_alpha(self, counts):
+        counts = counts.to(torch.float32)
+        total = float(counts.sum().item())
+        if total <= 0.0:
+            return torch.zeros((self.num_classes,), dtype=torch.float32)
+        return counts / total
 
     def _get_head_params(self, head):
         if hasattr(head, "weight"):
@@ -201,9 +316,8 @@ class clientGH(Client):
             return weight, bias
         raise NotImplementedError("CST requires a linear head with a weight matrix.")
 
-    def _weight_norm_logits(self, rep, model):
+    def _linear_logits(self, rep, model):
         weight, bias = self._get_head_params(model.head)
-        weight = weight / (weight.norm(dim=1, keepdim=True) + self.eps)
         logits = torch.matmul(rep, weight.t())
         if bias is not None:
             logits = logits + bias
@@ -226,7 +340,7 @@ class clientGH(Client):
                     x = x.to(self.device)
                 y = y.to(self.device)
                 rep = model.base(x)
-                logits = self._weight_norm_logits(rep, model)
+                logits = self._linear_logits(rep, model)
                 test_acc += (torch.sum(torch.argmax(logits, dim=1) == y)).item()
                 test_num += y.shape[0]
 
@@ -260,7 +374,7 @@ class clientGH(Client):
                     x = x.to(self.device)
                 y = y.to(self.device)
                 rep = model.base(x)
-                logits = self._weight_norm_logits(rep, model)
+                logits = self._linear_logits(rep, model)
                 loss = self.loss(logits, y)
                 train_num += y.shape[0]
                 losses += loss.item() * y.shape[0]

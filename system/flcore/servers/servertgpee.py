@@ -1,4 +1,7 @@
+import os
+import re
 import time
+import random
 from collections import defaultdict
 
 import torch
@@ -47,6 +50,7 @@ class FedTGP(Server):
         self.gap = torch.ones(self.num_classes, device=self.device) * 1e9
         self.min_gap = None
         self.max_gap = None
+        self.stage1_mode = self._resolve_tgpee_stage(args)
 
 
     def train(self):
@@ -84,9 +88,9 @@ class FedTGP(Server):
         assert (len(self.selected_clients) > 0)
 
         self.uploaded_ids = []
-        self.uploaded_protos = []
         uploaded_protos_per_client = []
         per_exit_counts = defaultdict(int)
+        exit_proto_lists = {}
         for client in self.selected_clients:
             self.uploaded_ids.append(client.id)
             protos_by_exit = load_item(client.role, 'protos', client.save_folder_name)
@@ -97,18 +101,19 @@ class FedTGP(Server):
                     if not class_map:
                         continue
                     for k, proto in class_map.items():
-                        self.uploaded_protos.append((proto, k))
+                        exit_proto_lists.setdefault(exit_id, {}).setdefault(int(k), []).append(proto)
                     uploaded_protos_per_client.append(class_map)
                     per_exit_counts[exit_id] += len(class_map)
             else:
-                for k in protos_by_exit.keys():
-                    self.uploaded_protos.append((protos_by_exit[k], k))
+                for k, proto in protos_by_exit.items():
+                    exit_proto_lists.setdefault(0, {}).setdefault(int(k), []).append(proto)
                 uploaded_protos_per_client.append(protos_by_exit)
 
         if per_exit_counts:
             total = sum(per_exit_counts.values())
             exit_str = ", ".join([f"{eid}:{cnt}" for eid, cnt in sorted(per_exit_counts.items())])
             print(f"[FedTGPEE] proto_usage total={total} per_exit=[{exit_str}]")
+        self.uploaded_protos = self._select_head_protos(exit_proto_lists)
 
         # calculate class-wise minimum distance
         self.gap = torch.ones(self.num_classes, device=self.device) * 1e9
@@ -127,6 +132,95 @@ class FedTGP(Server):
         print('class-wise minimum distance', self.gap)
         print('min_gap', self.min_gap)
         print('max_gap', self.max_gap)
+
+    def _resolve_tgpee_stage(self, args):
+        stage1 = "1_0"
+        raw_vals = [
+            os.getenv("TGPEE_STAGE", "").strip().lower(),
+            str(getattr(args, "tgpee_stage", "")).strip().lower(),
+        ]
+        for raw in raw_vals:
+            if not raw:
+                continue
+            tokens = [t for t in re.split(r"[+,|\\s]+", raw) if t]
+            for token in tokens:
+                token = token.replace("stage", "").replace("tgp", "").replace("ee", "").strip()
+                if token in {"1_0", "1_1", "1_2"}:
+                    stage1 = token
+        return stage1
+
+    def _flatten_exit_proto_lists(self, exit_proto_lists):
+        uploaded_protos = []
+        for class_map in exit_proto_lists.values():
+            for cc, proto_list in class_map.items():
+                y = torch.tensor(cc, dtype=torch.int64)
+                for proto in proto_list:
+                    uploaded_protos.append((proto, y))
+        return uploaded_protos
+
+    def _split_base_ee_protos(self, exit_proto_lists):
+        if not exit_proto_lists:
+            return {}, {}
+        exit_ids = sorted(exit_proto_lists.keys())
+        if not exit_ids:
+            return {}, {}
+        final_exit = max(exit_ids)
+        base_map = exit_proto_lists.get(final_exit, {})
+        ee_map = {}
+        for eid in exit_ids:
+            if eid == final_exit:
+                continue
+            class_map = exit_proto_lists.get(eid, {})
+            for cc, proto_list in class_map.items():
+                ee_map.setdefault(cc, []).extend(proto_list)
+        return base_map, ee_map
+
+    def _pick_with_cap(self, base_list, ee_list, cap):
+        if cap <= 0:
+            return []
+        base_list = list(base_list)
+        ee_list = list(ee_list)
+        base_count = len(base_list)
+        if base_count >= cap:
+            if base_count == cap:
+                return base_list
+            return random.sample(base_list, cap)
+        remaining = cap - base_count
+        if remaining <= 0:
+            return base_list
+        if len(ee_list) <= remaining:
+            return base_list + ee_list
+        return base_list + random.sample(ee_list, remaining)
+
+    def _select_head_protos(self, exit_proto_lists):
+        if not exit_proto_lists:
+            return []
+        if self.stage1_mode == "1_0":
+            return self._flatten_exit_proto_lists(exit_proto_lists)
+
+        base_map, ee_map = self._split_base_ee_protos(exit_proto_lists)
+        base_counts = {cc: len(plist) for cc, plist in base_map.items() if len(plist) > 0}
+        if not base_counts:
+            return self._flatten_exit_proto_lists(exit_proto_lists)
+
+        min_base = min(base_counts.values())
+        max_base = max(base_counts.values())
+        if self.stage1_mode == "1_1":
+            cap = 2 * min_base
+            print(f"[FedTGPEE] stage1_1 min_base={min_base} cap={cap}")
+        else:
+            cap = max_base
+            print(f"[FedTGPEE] stage1_2 max_base={max_base} cap={cap}")
+
+        uploaded_protos = []
+        for cc in sorted(base_map.keys()):
+            base_list = base_map.get(cc, [])
+            ee_list = ee_map.get(cc, [])
+            picked = self._pick_with_cap(base_list, ee_list, cap)
+            y = torch.tensor(cc, dtype=torch.int64)
+            for proto in picked:
+                uploaded_protos.append((proto, y))
+        return uploaded_protos
 
     def test_metrics(self):
         num_samples = []
