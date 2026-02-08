@@ -20,7 +20,7 @@ class clientGH(Client):
         self.class_counts = None
         self.gates = None
         self._freeze_hooks = []
-        if self.stage4_mode in {"4_1_1", "4_1_2", "4_1_3", "4_2_1", "4_2_2", "4_2_3"}:
+        if self.stage4_mode in {"4_1_1", "4_1_2", "4_1_3"}:
             self.class_counts = self._build_class_counts()
             if self.stage4_mode == "4_1_1":
                 self.gates = self._build_gates_hybrid(self.class_counts)
@@ -64,50 +64,6 @@ class clientGH(Client):
         
     def set_parameters(self):
         model = load_item(self.role, 'model', self.save_folder_name)
-        if self.stage4_mode in {"4_2_1", "4_2_2", "4_2_3"}:
-            global_head = load_item('Server', 'head', self.save_folder_name)
-            global_head = global_head.to(self.device)
-            global_weight, global_bias = self._get_head_params(global_head)
-            local_weight, local_bias = self._get_head_params(model.head)
-            if self.class_counts is None:
-                self.class_counts = self._build_class_counts()
-            counts = self.class_counts.to(torch.float32)
-            alpha = self._compute_stage4_2_1_alpha().to(global_weight.device)
-            if self.stage4_mode == "4_2_1":
-                scaled_weight = global_weight * alpha.unsqueeze(1)
-                local_weight.data.copy_(scaled_weight.data)
-                if local_bias is not None and global_bias is not None:
-                    local_bias.data.copy_(global_bias.data)
-                self._set_frozen_class_mask(model.head, None)
-            elif self.stage4_mode == "4_2_2":
-                mask_has = counts > 0
-                scaled_weight = local_weight.data.clone()
-                if mask_has.any():
-                    scaled_weight[mask_has] = global_weight[mask_has] * alpha[mask_has].unsqueeze(1)
-                local_weight.data.copy_(scaled_weight.data)
-                if local_bias is not None and global_bias is not None:
-                    scaled_bias = local_bias.data.clone()
-                    if mask_has.any():
-                        scaled_bias[mask_has] = global_bias[mask_has]
-                    local_bias.data.copy_(scaled_bias.data)
-                mask_zero = counts == 0
-                self._set_frozen_class_mask(model.head, mask_zero)
-            else:
-                alpha = self._compute_stage4_2_3_alpha(counts).to(global_weight.device)
-                mask_has = counts > 0
-                scaled_weight = local_weight.data.clone()
-                if mask_has.any():
-                    scaled_weight[mask_has] = global_weight[mask_has] * alpha[mask_has].unsqueeze(1)
-                local_weight.data.copy_(scaled_weight.data)
-                if local_bias is not None and global_bias is not None:
-                    scaled_bias = local_bias.data.clone()
-                    if mask_has.any():
-                        scaled_bias[mask_has] = global_bias[mask_has]
-                    local_bias.data.copy_(scaled_bias.data)
-                mask_zero = counts == 0
-                self._set_frozen_class_mask(model.head, mask_zero)
-            save_item(model, self.role, 'model', self.save_folder_name)
-            return
         if self.stage4_mode in {"4_1_1", "4_1_2", "4_1_3"}:
             global_head = load_item('Server', 'head', self.save_folder_name)
             global_head = global_head.to(self.device)
@@ -232,7 +188,7 @@ class clientGH(Client):
                 token = token.replace("stage", "").replace("cst", "").strip()
                 if token in {"1_0", "1_1", "1_2"}:
                     stage1 = token
-                if token in {"4_0", "4_1_1", "4_1_2", "4_1_3", "4_2_1", "4_2_2", "4_2_3"}:
+                if token in {"4_0", "4_1_1", "4_1_2", "4_1_3"}:
                     stage4 = token
         return stage1, stage4
 
@@ -268,39 +224,6 @@ class clientGH(Client):
         imbalance = torch.clamp((u - p) / (u + eps), min=0.0, max=1.0)
         confidence = self.lambda_gate / (counts + self.lambda_gate)
         return 1.0 - (1.0 - confidence) * (1.0 - imbalance)
-
-    def _compute_stage4_2_1_alpha(self):
-        counts = self.class_counts
-        if counts is None:
-            counts = self._build_class_counts()
-        counts = counts.to(torch.float32)
-        total = float(counts.sum().item())
-        if total <= 0.0:
-            return torch.ones((self.num_classes,), dtype=torch.float32)
-        c_max = float(counts.max().item())
-        if c_max <= 0.0:
-            return torch.full((self.num_classes,), 1.0 / total, dtype=torch.float32)
-        base = 1.0 / total
-        alpha = torch.full((self.num_classes,), base, dtype=torch.float32)
-        mask_has = counts > 0
-        mask_full = counts == c_max
-        mask_mid = mask_has & (~mask_full)
-        if mask_mid.any():
-            alpha[mask_mid] = base + (counts[mask_mid] / c_max)
-        if mask_full.any():
-            alpha[mask_full] = 1.0
-        return alpha
-
-    def _compute_stage4_2_3_alpha(self, counts):
-        counts = counts.to(torch.float32)
-        total = float(counts.sum().item())
-        if total <= 0.0:
-            return torch.zeros((self.num_classes,), dtype=torch.float32)
-        alpha = torch.zeros((self.num_classes,), dtype=torch.float32)
-        mask_has = counts > 0
-        if mask_has.any():
-            alpha[mask_has] = counts[mask_has] / total
-        return alpha
 
     def _compute_stage4_1_2_alpha(self, counts):
         counts = counts.to(torch.float32)

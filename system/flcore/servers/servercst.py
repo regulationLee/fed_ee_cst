@@ -89,7 +89,7 @@ class FedGH(Server):
                 token = token.replace("stage", "").replace("cst", "").strip()
                 if token in {"1_0", "1_1", "1_2"}:
                     stage1 = token
-                if token in {"4_0", "4_1_1", "4_1_2", "4_1_3", "4_2_1", "4_2_2", "4_2_3"}:
+                if token in {"4_0", "4_1_1", "4_1_2", "4_1_3"}:
                     stage4 = token
         return stage1, stage4
 
@@ -259,7 +259,10 @@ class FedGH(Server):
                 w = w / (w_norm + 1e-12)
             new_weight[k] = w
             if new_bias is not None and head_bin.bias is not None:
-                new_bias[k] = head_bin.bias[1].detach()
+                b = head_bin.bias[1].detach()
+                if w_norm.item() > 0:
+                    b = b / (w_norm + 1e-12)
+                new_bias[k] = b
         return new_weight, new_bias
 
     def _binary_head_loss(self, head_bin, pos_proto, neg_protos):
