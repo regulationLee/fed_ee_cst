@@ -218,11 +218,11 @@ class Server(object):
         self.round_cnt += 1
 
         stats = self.test_metrics()
-        # stats_train = self.train_metrics()
+        stats_train = self.train_metrics()
 
         test_acc = sum(stats[2])*1.0 / sum(stats[1])
         test_auc = sum(stats[3])*1.0 / sum(stats[1])
-        # train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1])
+        train_loss = sum(stats_train[2])*1.0 / sum(stats_train[1])
         accs = [a / n for a, n in zip(stats[2], stats[1])]
         aucs = [a / n for a, n in zip(stats[3], stats[1])]
         
@@ -242,6 +242,15 @@ class Server(object):
         # self.print_(test_acc, train_acc, train_loss)
         print("Std Test Accuracy: {:.4f}".format(np.std(accs)))
         print("Std Test AUC: {:.4f}".format(np.std(aucs)))
+
+        if not self.args.wandb_log:
+            wandb.log({
+                "Global/Test_Accuracy": test_acc,
+                # "Global/Test_AUC": test_auc,
+                "Global/Train_Loss": train_loss,
+                "Round": self.round_cnt
+            }, step=self.round_cnt)
+
 
     def print_(self, test_acc, test_auc, train_loss):
         print("Average Test Accuracy: {:.4f}".format(test_acc))
