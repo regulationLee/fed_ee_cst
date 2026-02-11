@@ -1,1 +1,1 @@
-python main.py -algo FedCST -data Cifar100 -ncl 100 -nc 20 -m HtFE-img-4 -gr 500 -sbs 2 -se 10 -cst_stage 1_1+4_1_3 -cst_n_neg 0 -go original_code
+nohup python -u main.py -algo FedCST -data Cifar100 -ncl 100 -nc 20 -m HtFE-img-4 -gr 500 -sbs 2 -se 10 -cst_stage 1_1+4_1_3 -cst_n_neg 0 -go original_code
