@@ -11,3 +11,5 @@ nohup python -u main.py -t 3 -ab 1 -lr 0.01 -jr 1 -lbs 10 -ls 1 -nc 20 -ncl 100 
 nohup python -u main.py -t 3 -ab 1 -lr 0.01 -jr 1 -lbs 10 -ls 1 -nc 20 -ncl 100 -data Cifar100 -m HtFE-img-8 -fd 512 -did 2 -algo FedKTL-stylegan-3 -slr 0.01 -sbs 100 -se 100 -lam 0.1 -mu 50 -GPath stylegan/stylegan-3-models/Benches-512.pkl > total-Cifar100-HtFE-img-8-fd=512-FedKTL-stylegan-3.out 2>&1 &
 nohup python -u main.py -t 3 -ab 1 -lr 0.01 -jr 1 -lbs 10 -ls 1 -nc 20 -ncl 100 -data Cifar100 -m HtFE-img-8 -fd 512 -did 1 -algo FedKTL-stable-diffusion -slr 0.1 -sbs 100 -se 100 -lam 0.01 -mu 100 -GPath stable-diffusion/v1.5 > total-Cifar100-HtFE-img-8-fd=512-FedKTL-stable-diffusion.out 2>&1 &
 nohup python -u main.py -t 3 -ab 1 -lr 0.01 -jr 1 -lbs 10 -ls 1 -nc 20 -ncl 100 -data Cifar100 -m HtFE-img-8 -fd 512 -did 4 -algo FedMRL -sfd 128 > total-Cifar100-HtFE-img-8-fd=512-FedMRL.out 2>&1 &
+
+

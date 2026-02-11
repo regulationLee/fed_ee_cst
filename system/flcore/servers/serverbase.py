@@ -9,6 +9,8 @@ import shutil
 from utils.data_utils import read_client_data
 from flcore.clients.clientbase import load_item, save_item
 
+import wandb
+
 
 class Server(object):
     def __init__(self, args, times):
@@ -175,6 +177,15 @@ class Server(object):
             tot_auc.append(auc*ns)
             num_samples.append(ns)
 
+            # WandB Test Accuracy
+            if getattr(self.args, 'perclient_log', False):
+                if ns > 0:
+                    wandb.log({
+                        f"Client_{c.id}/Test_Accuracy": ct / ns,
+                        # f"Client_{c.id}/Test_AUC": auc,
+                        "Round": self.round_cnt
+                    }, commit=False)
+
         ids = [c.id for c in self.clients]
 
         return ids, num_samples, tot_correct, tot_auc
@@ -188,12 +199,22 @@ class Server(object):
             losses.append(cl*1.0)
             print(f'Client {c.id}: Loss: {cl*1.0/ns}')
 
+            # WandB Train Loss
+            if getattr(self.args, 'perclient_log', False):
+                if ns > 0:
+                    wandb.log({
+                        f"Client_{c.id}/Train_Loss": cl / ns,
+                        "Round": self.round_cnt
+                    }, commit=False)
+
         ids = [c.id for c in self.clients]
 
         return ids, num_samples, losses
 
     # evaluate selected clients
     def evaluate(self, acc=None, loss=None):
+        self.round_cnt += 1
+
         stats = self.test_metrics()
         # stats_train = self.train_metrics()
 

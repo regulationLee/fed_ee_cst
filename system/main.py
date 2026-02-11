@@ -8,6 +8,7 @@ import numpy as np
 import logging
 import json
 
+
 from flcore.servers.serverlocal import Local
 from flcore.servers.serverproto import FedProto
 from flcore.servers.serverprotoee import FedProto as FedProto_EE
@@ -17,7 +18,9 @@ from flcore.servers.serverlg import LG_FedAvg
 from flcore.servers.serverfml import FML
 from flcore.servers.serverkd import FedKD
 from flcore.servers.servergh import FedGH
+
 from flcore.servers.servercst import FedGH as FedCST
+
 from flcore.servers.serverghee import FedGH as FedGH_EE
 from flcore.servers.serverprotonorm import ProtoNorm
 from flcore.servers.servertgp import FedTGP
@@ -34,7 +37,11 @@ logger = logging.getLogger()
 logger.setLevel(logging.ERROR)
 
 warnings.simplefilter("ignore")
-torch.manual_seed(0)
+# torch.manual_seed(0)
+
+import wandb
+wandb.login(key="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")
+
 
 def run(args):
 
@@ -45,6 +52,22 @@ def run(args):
         print(f"\n============= Running time: {i}th =============")
         print("Creating server and clients ...")
         start = time.time()
+
+        if args.times > 1:
+            run_name = f"{args.goal}_{i}"
+        else:
+            run_name = args.goal
+
+        wandb.init(
+            entity="lgj413-korea-cyber-university",
+            project="FedCST",
+
+            group=f"{args.dataset}_{args.algorithm}",
+            name=run_name,
+
+            config=vars(args),
+            reinit=True
+        )
 
         # Generate args.models
         if args.model_family == "Ht0":

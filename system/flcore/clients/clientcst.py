@@ -13,7 +13,7 @@ from collections import defaultdict
 class clientGH(Client):
     def __init__(self, args, id, train_samples, test_samples, **kwargs):
         super().__init__(args, id, train_samples, test_samples, **kwargs)
-        torch.manual_seed(0)
+        # torch.manual_seed(0)
         self.stage1_mode, self.stage4_mode = self._resolve_cst_modes(args)
         self.lambda_gate = self._get_env_float("CST_LAMBDA_GATE", float(getattr(args, "cst_lambda_gate", 10.0)))
         self.eps = 1e-7
