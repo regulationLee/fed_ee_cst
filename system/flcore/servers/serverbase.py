@@ -243,13 +243,13 @@ class Server(object):
         print("Std Test Accuracy: {:.4f}".format(np.std(accs)))
         print("Std Test AUC: {:.4f}".format(np.std(aucs)))
 
-        if not self.args.wandb_log:
-            wandb.log({
-                "Global/Test_Accuracy": test_acc,
-                # "Global/Test_AUC": test_auc,
-                "Global/Train_Loss": train_loss,
-                "Round": self.round_cnt
-            }, step=self.round_cnt)
+        # if not self.args.wandb_log:
+        wandb.log({
+            "Global/Test_Accuracy": test_acc,
+            # "Global/Test_AUC": test_auc,
+            "Global/Train_Loss": train_loss,
+            "Round": self.round_cnt
+        }, step=self.round_cnt)
 
 
     def print_(self, test_acc, test_auc, train_loss):
