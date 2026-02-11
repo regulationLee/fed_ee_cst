@@ -20,6 +20,8 @@ class Server(object):
         self.dataset = args.dataset
         self.num_classes = args.num_classes
         self.global_rounds = args.global_rounds
+        self.round_cnt = 0
+
         self.local_epochs = args.local_epochs
         self.batch_size = args.batch_size
         self.learning_rate = args.local_learning_rate
